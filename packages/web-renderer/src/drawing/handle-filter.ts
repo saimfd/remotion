@@ -1,4 +1,23 @@
 import {getBiggestBoundingClientRect} from '../get-biggest-bounding-client-rect';
+import {offscreenCanvasSupportsFilter} from './offscreen-canvas-supports-filter';
+
+/**
+ * Parses blur() values from a CSS filter string. Like drop-shadow, blur spreads
+ * beyond the element bounds, so the precompose rect must be expanded to leave
+ * room for the blurred halo. CSS blur-radius is a Gaussian standard deviation;
+ * its visible extent is roughly 3σ.
+ */
+const parseBlurExpansion = (filter: string): number => {
+	let maxBlur = 0;
+	const blurRegex = /blur\(\s*([+-]?\d*\.?\d+)px\s*\)/gi;
+	let match;
+
+	while ((match = blurRegex.exec(filter)) !== null) {
+		maxBlur = Math.max(maxBlur, parseFloat(match[1]));
+	}
+
+	return maxBlur * 3;
+};
 
 /**
  * Parses drop-shadow values from a CSS filter string to calculate
@@ -80,7 +99,16 @@ export const getPrecomposeRectForFilter = ({
 }): DOMRect => {
 	// Use getBiggestBoundingClientRect to include all children that may overflow
 	const elementRect = getBiggestBoundingClientRect(element);
-	const expansion = parseDropShadowExpansion(filter);
+	const dropShadow = parseDropShadowExpansion(filter);
+	// blur() spreads symmetrically on all sides.
+	const blur = parseBlurExpansion(filter);
+
+	const expansion = {
+		left: dropShadow.left + blur,
+		right: dropShadow.right + blur,
+		top: dropShadow.top + blur,
+		bottom: dropShadow.bottom + blur,
+	};
 
 	return new DOMRect(
 		elementRect.left - expansion.left,
@@ -92,6 +120,10 @@ export const getPrecomposeRectForFilter = ({
 
 /**
  * Applies a filter when drawing a precomposed canvas to the main context.
+ *
+ * On Safari, where `ctx.filter` is a no-op on OffscreenCanvas, the draw is redirected onto
+ * an intermediate regular `<canvas>` (which does honor the filter) and the
+ * filtered result is composited back — `drawImage` itself needs no filter.
  */
 export const applyFilterToDrawOperation = ({
 	context,
@@ -100,10 +132,34 @@ export const applyFilterToDrawOperation = ({
 }: {
 	context: OffscreenCanvasRenderingContext2D;
 	filter: string;
-	drawFn: () => void;
+	drawFn: (
+		target: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
+	) => void;
 }) => {
-	const previousFilter = context.filter;
-	context.filter = filter;
-	drawFn();
-	context.filter = previousFilter;
+	if (offscreenCanvasSupportsFilter()) {
+		const previousFilter = context.filter;
+		context.filter = filter;
+		drawFn(context);
+		context.filter = previousFilter;
+		return;
+	}
+
+	const temp = document.createElement('canvas');
+	temp.width = context.canvas.width;
+	temp.height = context.canvas.height;
+	const tempCtx = temp.getContext('2d');
+	if (!tempCtx) {
+		// Should not happen; draw without the filter rather than nothing.
+		drawFn(context);
+		return;
+	}
+
+	const currentTransform = context.getTransform();
+	tempCtx.setTransform(currentTransform);
+	tempCtx.filter = filter;
+	drawFn(tempCtx);
+
+	context.setTransform(new DOMMatrix());
+	context.drawImage(temp, 0, 0);
+	context.setTransform(currentTransform);
 };

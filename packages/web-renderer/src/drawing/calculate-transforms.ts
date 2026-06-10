@@ -1,5 +1,6 @@
 import {hasAnyTransformCssValue, hasTransformCssValue} from './has-transform';
 import {getMaskImageValue, parseMaskImage} from './mask-image';
+import {offscreenCanvasSupportsFilter} from './offscreen-canvas-supports-filter';
 import type {LinearGradientInfo} from './parse-linear-gradient';
 import {parseTransformOrigin} from './parse-transform-origin';
 
@@ -16,6 +17,13 @@ const filterRequiresPrecompositing = (filter: string): string | null => {
 	// Check for drop-shadow filter - this requires precompositing
 	// because the shadow should be based on the composite alpha of parent + children
 	if (filter.includes('drop-shadow')) {
+		return filter;
+	}
+
+	// WebKit doesn't support `ctx.filter` on OffscreenCanvas, so we can't apply
+	// other filters (blur, brightness, ...) inline. Precomposite them too and
+	// apply the filter via an intermediate canvas (see `handle-filter.ts`).
+	if (!offscreenCanvasSupportsFilter()) {
 		return filter;
 	}
 
